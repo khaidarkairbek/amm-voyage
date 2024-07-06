@@ -16,7 +16,7 @@ pub fn unsigned_add(x: U256, y: U256) -> Result<U256, String> {
 /// @param x The minuend
 /// @param y The subtrahend
 /// @return z The difference of x and y
-pub fn unsigned_sub(x: U256, y: U256) -> Result<U256, String> {
+pub fn _unsigned_sub(x: U256, y: U256) -> Result<U256, String> {
     let (z, underflow) = x.overflowing_sub(y); 
     match underflow {
         true => Err("Subtraction underflow".to_string()), 
@@ -28,7 +28,7 @@ pub fn unsigned_sub(x: U256, y: U256) -> Result<U256, String> {
 /// @param x The multiplicand
 /// @param y The multiplier
 /// @return z The product of x and y
-pub fn mul(x: U256, y: U256) -> Result<U256, String> {
+pub fn _mul(x: U256, y: U256) -> Result<U256, String> {
     let (z, overflow) = x.overflowing_mul(y); 
     match overflow {
         true => Err("Multiplication overflow".to_string()), 

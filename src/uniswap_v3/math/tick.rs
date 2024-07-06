@@ -1,17 +1,12 @@
 use std::collections::HashMap;
 
-use alloy::{primitives::{Address, U256}, sol, transports::http::{Client, Http}, providers::{Provider, ProviderBuilder, RootProvider}};
-use super::{liquidity_math::add_delta, low_gas_safe_math::*, pool, tick_math::*}; 
+use alloy::{primitives::Address, sol, transports::http::{Client, Http}, providers::RootProvider};
+use super::{liquidity_math::add_delta, tick_math::*}; 
 
 #[derive(Default)]
 pub struct Info {
     liquidity_gross: u128, 
     liquidity_net: i128, 
-    fee_growth_outside0_x128: U256, 
-    fee_growth_outside1_x128: U256, 
-    tick_cumulative_outside: i64, 
-    seconds_per_liquidity_outside_x128: U256, 
-    seconds_outside: u32, 
     initialized: bool
 }
 
@@ -20,52 +15,12 @@ pub struct Info {
 /// @param tickSpacing The amount of required tick separation, realized in multiples of `tickSpacing`
 ///     e.g., a tickSpacing of 3 requires ticks to be initialized every 3rd tick i.e., ..., -6, -3, 0, 3, 6, ...
 /// @return The max liquidity per tick
-pub fn tick_spacing_to_max_liquidity_per_tick ( tick_spacing: i32 ) -> u128 {
+pub fn _tick_spacing_to_max_liquidity_per_tick ( tick_spacing: i32 ) -> u128 {
     let min_tick: i32 = (MIN_TICK / tick_spacing) * tick_spacing; 
     let max_tick: i32 = (MAX_TICK / tick_spacing) * tick_spacing; 
 
     let num_ticks = ((max_tick - min_tick) / tick_spacing) as u32 + 1; 
     u128::MAX / num_ticks as u128
-}
-
-/// @notice Retrieves fee growth data
-/// @param self The mapping containing all tick information for initialized ticks
-/// @param tickLower The lower tick boundary of the position
-/// @param tickUpper The upper tick boundary of the position
-/// @param tickCurrent The current tick
-/// @param feeGrowthGlobal0X128 The all-time global fee growth, per unit of liquidity, in token0
-/// @param feeGrowthGlobal1X128 The all-time global fee growth, per unit of liquidity, in token1
-/// @return feeGrowthInside0X128 The all-time fee growth in token0, per unit of liquidity, inside the position's tick boundaries
-/// @return feeGrowthInside1X128 The all-time fee growth in token1, per unit of liquidity, inside the position's tick boundaries
-pub async fn get_fee_growth_inside (
-    provider: &RootProvider<Http<Client>>, 
-    pool_address: Address,
-    tick_lower: i32, 
-    tick_upper: i32, 
-    tick_current: i32, 
-    fee_growth_global0_x128: U256, 
-    fee_growth_global1_x128: U256
-) -> Result<(U256, U256), String> {
-    //let lower = mapping.get(&tick_lower).ok_or("Lower tick is not in the mapping".to_string())?;
-    //let upper = mapping.get(&tick_upper).ok_or("Lower tick is not in the mapping".to_string())?;
-    let lower = get_tick_info_from_ticks(provider, pool_address, &tick_lower).await?; 
-    let upper = get_tick_info_from_ticks(provider, pool_address, &tick_upper).await?;
-
-
-    let (fee_growth_below0_x128, fee_growth_below1_x128) = match tick_current >= tick_lower {
-        true => (lower.fee_growth_outside0_x128, lower.fee_growth_outside1_x128), 
-        false => (fee_growth_global0_x128 - lower.fee_growth_outside0_x128, fee_growth_global1_x128 - lower.fee_growth_outside1_x128)
-    };
-
-    let (fee_growth_above0_x128, fee_growth_above1_x128) = match tick_current < tick_upper {
-        true => (upper.fee_growth_outside0_x128, upper.fee_growth_outside1_x128), 
-        false => (fee_growth_global0_x128 - upper.fee_growth_outside0_x128, fee_growth_global1_x128 - upper.fee_growth_outside1_x128)
-    };
-
-    let fee_growth_inside0_x128 = fee_growth_global0_x128 - fee_growth_below0_x128 - fee_growth_above0_x128; 
-    let fee_growth_inside1_x128 = fee_growth_global1_x128 - fee_growth_below1_x128 - fee_growth_above1_x128; 
-
-    Ok((fee_growth_inside0_x128, fee_growth_inside1_x128))
 }
 
 pub async fn get_tick_info_from_ticks (provider: &RootProvider<Http<Client>>, pool_address: Address, tick: &i32) -> Result<Info, String> {
@@ -92,25 +47,15 @@ pub async fn get_tick_info_from_ticks (provider: &RootProvider<Http<Client>>, po
     let tick_info: Info = match pool.ticks(*tick).call().await.map_err(|e| e.to_string())? {
         IPool::ticksReturn{
             liquidityGross, 
-            liquidityNet, 
-            feeGrowthOutside0X128, 
-            feeGrowthOutside1X128, 
-            tickCumulativeOutside, 
-            secondsPerLiquidityOutsideX128, 
-            secondsOutside, 
-            initialized
+            liquidityNet,
+            initialized, 
+            ..
         } => Info {
             liquidity_gross: liquidityGross, 
             liquidity_net: liquidityNet, 
-            fee_growth_outside0_x128: feeGrowthOutside0X128, 
-            fee_growth_outside1_x128: feeGrowthOutside1X128, 
-            tick_cumulative_outside: tickCumulativeOutside, 
-            seconds_per_liquidity_outside_x128: secondsPerLiquidityOutsideX128, 
-            seconds_outside: secondsOutside,
             initialized: initialized
         }
     };
-
 
     Ok(tick_info)
 }
@@ -129,16 +74,10 @@ pub async fn get_tick_info_from_ticks (provider: &RootProvider<Http<Client>>, po
 /// @param upper true for updating a position's upper tick, or false for updating a position's lower tick
 /// @param maxLiquidity The maximum liquidity allocation for a single tick
 /// @return flipped Whether the tick was flipped from initialized to uninitialized, or vice versa
-pub fn update (
+pub fn _update (
     mapping: &mut HashMap<i32, Info>, 
     tick: i32, 
-    tick_current: i32, 
-    liquidity_delta: i128, 
-    fee_growth_global0_x128: U256, 
-    fee_growth_global1_x128: U256, 
-    seconds_per_liquidity_cumulative_x128: U256, 
-    tick_cumulative: i64,
-    time: u32, 
+    liquidity_delta: i128,
     upper: bool, 
     max_liquidity: u128 
 ) -> Result<bool, String> {
@@ -153,14 +92,6 @@ pub fn update (
     let flipped = (liquidity_gross_after == 0) != (liquidity_gross_before == 0); 
 
     if liquidity_gross_before == 0 {
-        if tick <= tick_current {
-            tick_info.fee_growth_outside0_x128 = fee_growth_global0_x128; 
-            tick_info.fee_growth_outside1_x128 = fee_growth_global1_x128; 
-            tick_info.seconds_per_liquidity_outside_x128 = seconds_per_liquidity_cumulative_x128; 
-            tick_info.tick_cumulative_outside = tick_cumulative; 
-            tick_info.seconds_outside = time;
-        }; 
-
         tick_info.initialized = true; 
     }
 
@@ -182,13 +113,6 @@ pub fn update (
             None => return Err("Overflow occured in liquidity net calculation".to_string())
         }
     }
-}
-
-/// @notice Clears tick data
-/// @param self The mapping containing all initialized tick information for initialized ticks
-/// @param tick The tick that will be cleared
-pub fn clear(mapping: &mut HashMap<i32, Info>, tick: &i32) {
-    mapping.remove(&tick); 
 }
 
 /// @notice Transitions to next tick as needed by price movement

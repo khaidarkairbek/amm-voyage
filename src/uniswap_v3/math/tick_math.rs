@@ -6,6 +6,9 @@ pub const MIN_TICK: i32 = -887272;
 /// @dev The maximum tick that may be passed to #getSqrtRatioAtTick computed from log base 1.0001 of 2**128 
 pub const MAX_TICK: i32 = -MIN_TICK;
 
+pub const MIN_WORD_POS: i16 = -3466;
+pub const MAX_WORD_POS: i16 = 3465;
+
 /// @dev The minimum value that can be returned from #getSqrtRatioAtTick. Equivalent to getSqrtRatioAtTick(MIN_TICK)
 pub const MIN_SQRT_RATIO: U256 = U256::from_limbs([4295128739, 0, 0, 0]);
 /// @dev The maximum value that can be returned from #getSqrtRatioAtTick. Equivalent to getSqrtRatioAtTick(MAX_TICK)
@@ -25,7 +28,6 @@ pub const TICK_HIGH: I256 = I256::from_raw(U256::from_limbs([
     0,
     0,
 ]));
-
 /// @notice Calculates sqrt(1.0001^tick) * 2^96
 /// @dev Throws if |tick| > max tick
 /// @param tick The input tick for the above formula

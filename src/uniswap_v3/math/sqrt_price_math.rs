@@ -227,7 +227,7 @@ pub fn get_amount1_delta_round_up (
 /// @param sqrtRatioBX96 Another sqrt price
 /// @param liquidity The change in liquidity for which to compute the amount0 delta
 /// @return amount0 Amount of token0 corresponding to the passed liquidityDelta between the two prices
-pub fn get_amount0_delta(
+pub fn _get_amount0_delta(
     sqrt_ratio_ax96: U256, 
     sqrt_ratio_bx96: U256, 
     liquidity: i128,
@@ -243,7 +243,7 @@ pub fn get_amount0_delta(
 /// @param liquidity The change in liquidity for which to compute the amount1 delta
 /// @return amount1 Amount of token1 corresponding to the passed liquidityDelta between the two prices
 
-pub fn get_amount1_delta(
+pub fn _get_amount1_delta(
     sqrt_ratio_ax96: U256, 
     sqrt_ratio_bx96: U256, 
     liquidity: i128,

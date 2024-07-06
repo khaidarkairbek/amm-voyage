@@ -8,6 +8,5 @@ pub fn to_int256 (
     if b < I256::ZERO {
         return Err("Overflow when converting from U256 to I256".to_string()); 
     }
-
     Ok(b)
 }
