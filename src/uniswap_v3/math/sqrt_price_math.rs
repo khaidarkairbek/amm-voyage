@@ -1,7 +1,7 @@
 
 use alloy::primitives::{U256, U160, I256};
 use super::{full_math, low_gas_safe_math, unsafe_math, constants::{FIXED_POINT96_RESOLUTION, Q96}, safe_cast::to_int256}; 
-
+use eyre::{eyre, Result}; 
 
 /// @notice Gets the next sqrt price given a delta of token0
 /// @dev Always rounds up, because in the exact output case (increasing price) we need to move the price at least
@@ -19,9 +19,9 @@ pub fn get_next_sqrt_price_from_amount0_rounding_up (
     liquidity: u128, 
     amount: U256, 
     add: bool
-) -> Result<U256, String> {
+) -> Result<U256> {
     // we short circuit amount == 0 because the result is otherwise not guaranteed to equal the input price
-    if amount.is_zero() {return Err("Amount is zero: no change".to_string())}; 
+    if amount.is_zero() {return Err(eyre!("Amount is zero: no change"))}; 
 
     let numerator1: U256 = U256::from(liquidity) << FIXED_POINT96_RESOLUTION; 
 
@@ -32,10 +32,9 @@ pub fn get_next_sqrt_price_from_amount0_rounding_up (
                 let denominator = numerator1.wrapping_add(product); 
                 return full_math::mul_div_rounding_up(numerator1, sqrt_px96, denominator)
             } else {
-                match low_gas_safe_math::unsigned_add(numerator1.wrapping_div(sqrt_px96), amount) {
-                    Ok(result) => Ok(unsafe_math::div_rounding_up(numerator1, result)),
-                    Err(e) => return Err(e)
-                }
+
+                let result = low_gas_safe_math::unsigned_add(numerator1.wrapping_div(sqrt_px96), amount)?; 
+                Ok(unsafe_math::div_rounding_up(numerator1, result))
             }
         },
         false => {
@@ -45,14 +44,14 @@ pub fn get_next_sqrt_price_from_amount0_rounding_up (
                 let result = full_math::mul_div_rounding_up(numerator1, sqrt_px96, denominator)?; 
                 match result > U256::from(U160::MAX) {
                     true => {
-                        Err("Sqrt price x96 is bigger than u160".to_string())
+                        Err(eyre!("Sqrt price x96 is bigger than u160"))
                     }, 
                     false => {
                         Ok(result)
                     }
                 }
             } else {
-                Err("Error getting sqrt price from amount 0 rounding up".to_string())
+                Err(eyre!("Error getting sqrt price from amount 0 rounding up"))
             }
         }
     }
@@ -73,7 +72,7 @@ pub fn get_next_sqrt_price_from_amount1_rounding_down (
     liquidity: u128, 
     amount: U256, 
     add: bool
-) -> Result<U256, String> {
+) -> Result<U256> {
     match add {
         true => {
             let quotient = match amount <= U256::from(U160::MAX) {
@@ -87,7 +86,7 @@ pub fn get_next_sqrt_price_from_amount1_rounding_down (
             let result = low_gas_safe_math::unsigned_add(sqrt_px96, quotient)?; 
             match result > U256::from(U160::MAX) {
                 true => {
-                    Err("Sqrt price x96 is bigger than u160".to_string())
+                    Err(eyre!("Sqrt price x96 is bigger than u160"))
                 }, 
                 false => {
                     Ok(result)
@@ -106,7 +105,7 @@ pub fn get_next_sqrt_price_from_amount1_rounding_down (
             if sqrt_px96 > quotient {
                 Ok(sqrt_px96.wrapping_sub(quotient))
             } else {
-                Err("Price can not be lower than 0".to_string())
+                Err(eyre!("Price can not be lower than 0"))
             }
         }
     }
@@ -126,14 +125,14 @@ pub fn get_next_sqrt_price_from_input(
     liquidity: u128, 
     amount_in: U256, 
     zero_for_one: bool
-) -> Result<U256, String> {
+) -> Result<U256> {
     if sqrt_px96 > U256::ZERO && liquidity > 0 {
         match zero_for_one {
             true => get_next_sqrt_price_from_amount0_rounding_up(sqrt_px96, liquidity, amount_in, true), 
             false => get_next_sqrt_price_from_amount1_rounding_down(sqrt_px96, liquidity, amount_in, true)
         }
     } else {
-        Err("Price and liquidity should be greater than zero".to_string())
+        Err(eyre!("Price and liquidity should be greater than zero"))
     }
 }
 
@@ -149,14 +148,14 @@ pub fn get_next_sqrt_price_from_output(
     liquidity: u128, 
     amount_out: U256, 
     zero_for_one: bool
-) -> Result<U256, String> {
+) -> Result<U256> {
     if sqrt_px96 > U256::ZERO && liquidity > 0 {
         match zero_for_one {
             true => get_next_sqrt_price_from_amount1_rounding_down(sqrt_px96, liquidity, amount_out, false), 
             false => get_next_sqrt_price_from_amount0_rounding_up(sqrt_px96, liquidity, amount_out, false)
         }
     } else {
-        Err("Price and liquidity should be greater than zero".to_string())
+        Err(eyre!("Price and liquidity should be greater than zero"))
     }
 }
 
@@ -173,7 +172,7 @@ pub fn get_amount0_delta_round_up (
     mut sqrt_ratio_bx96: U256, 
     liquidity: u128, 
     round_up: bool
-) -> Result<U256, String> {
+) -> Result<U256> {
     if sqrt_ratio_ax96 > sqrt_ratio_bx96 { 
         let temp = sqrt_ratio_ax96.clone();
         sqrt_ratio_ax96 = sqrt_ratio_bx96; 
@@ -183,7 +182,7 @@ pub fn get_amount0_delta_round_up (
     let numerator1: U256 = U256::from(liquidity) << FIXED_POINT96_RESOLUTION;
     let numerator2: U256 = sqrt_ratio_bx96.wrapping_sub(sqrt_ratio_ax96); 
 
-    if sqrt_ratio_ax96.is_zero() {return Err("Sqrt ratio ax 96 can not be 0".to_string())}; 
+    if sqrt_ratio_ax96.is_zero() {return Err(eyre!("Sqrt ratio ax 96 can not be 0"))}; 
 
     match round_up {
         true => {
@@ -207,7 +206,7 @@ pub fn get_amount1_delta_round_up (
     mut sqrt_ratio_bx96: U256, 
     liquidity: u128, 
     round_up: bool
-) -> Result<U256, String> {
+) -> Result<U256> {
     if sqrt_ratio_ax96 > sqrt_ratio_bx96 { 
         std::mem::swap(&mut sqrt_ratio_ax96, &mut sqrt_ratio_bx96);
     }
@@ -231,7 +230,7 @@ pub fn _get_amount0_delta(
     sqrt_ratio_ax96: U256, 
     sqrt_ratio_bx96: U256, 
     liquidity: i128,
-) -> Result<I256, String> {
+) -> Result<I256> {
     match liquidity < 0 {
         true => Ok(-to_int256(get_amount0_delta_round_up(sqrt_ratio_ax96, sqrt_ratio_bx96, liquidity.unsigned_abs(), false)?)?), 
         false => to_int256(get_amount0_delta_round_up(sqrt_ratio_ax96, sqrt_ratio_bx96, liquidity.unsigned_abs(), true)?)
@@ -247,7 +246,7 @@ pub fn _get_amount1_delta(
     sqrt_ratio_ax96: U256, 
     sqrt_ratio_bx96: U256, 
     liquidity: i128,
-) -> Result<I256, String> {
+) -> Result<I256> {
     match liquidity < 0 {
         true => Ok(-to_int256(get_amount1_delta_round_up(sqrt_ratio_ax96, sqrt_ratio_bx96, liquidity.unsigned_abs(), false)?)?), 
         false => to_int256(get_amount1_delta_round_up(sqrt_ratio_ax96, sqrt_ratio_bx96, liquidity.unsigned_abs(), true)?)

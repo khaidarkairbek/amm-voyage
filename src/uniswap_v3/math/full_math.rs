@@ -1,6 +1,6 @@
 use alloy::primitives::U256; 
 use super::constants::{U256_1, U256_2, U256_3};
-
+use eyre::{eyre, Result}; 
 
 
 /// @notice Calculates floor(a×b÷denominator) with full precision. Throws if result overflows a uint256 or denominator == 0
@@ -13,7 +13,7 @@ pub fn mul_div(
     a: U256, 
     b: U256, 
     mut denominator: U256
-) -> Result<U256, String> {
+) -> Result<U256> {
     // 512-bit multiply [prod1 prod0] = a * b
     // Compute the product mod 2**256 and mod 2**256 - 1
     // then use the Chinese Remainder Theorem to reconstruct
@@ -27,13 +27,13 @@ pub fn mul_div(
     // Handle non-overflow cases, 256 by 256 division
     if prod1.is_zero() {
         if denominator.is_zero() {
-            return Err("Denominator is zero".to_string())
+            return Err(eyre!("Denominator is zero"))
         } else {
             return Ok(prod0.wrapping_div(denominator))
         }
     } else {
         if denominator <= prod1 {
-            return Err("Denomniator is less than prod one".to_string())
+            return Err(eyre!("Denomniator is less than prod one"))
         } else {
             let remainder = a.mul_mod(b, denominator);
             prod0 = prod0.overflowing_sub(remainder).0; 
@@ -93,21 +93,17 @@ pub fn mul_div_rounding_up(
     a: U256, 
     b: U256, 
     denominator: U256
-) -> Result<U256, String> {
+) -> Result<U256> {
 
-    match mul_div(a, b, denominator) {
-        Ok(mut result) => {
-            if a.mul_mod(b, denominator) > U256::ZERO {
-                if result < U256::MAX {
-                    result = result + U256_1; 
-                    Ok(result)
-                } else {
-                    Err("Result is u256 max value".to_string())
-                }
-            } else {
-                Ok(result)
-            }
-        }, 
-        Err(e) => Err(e)
+    let mut result = mul_div(a, b, denominator)?;
+    if a.mul_mod(b, denominator) > U256::ZERO {
+        if result < U256::MAX {
+            result = result + U256_1; 
+            Ok(result)
+        } else {
+            Err(eyre!("Result is u256 max value"))
+        }
+    } else {
+        Ok(result)
     }
 }

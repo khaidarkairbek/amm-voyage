@@ -1,7 +1,6 @@
 use std::collections::HashMap;
-
-use alloy::{primitives::Address, sol, transports::http::{Client, Http}, providers::RootProvider};
 use super::{liquidity_math::add_delta, tick_math::*}; 
+use eyre::{eyre, Result}; 
 
 #[derive(Default)]
 pub struct Info {
@@ -21,43 +20,6 @@ pub fn _tick_spacing_to_max_liquidity_per_tick ( tick_spacing: i32 ) -> u128 {
 
     let num_ticks = ((max_tick - min_tick) / tick_spacing) as u32 + 1; 
     u128::MAX / num_ticks as u128
-}
-
-pub async fn get_tick_info_from_ticks (provider: &RootProvider<Http<Client>>, pool_address: Address, tick: &i32) -> Result<Info, String> {
-    sol! {
-        #[sol(rpc)]
-        interface IPool {
-            function ticks(int24 tick)
-            external
-            view
-            returns (
-                uint128 liquidityGross,
-                int128 liquidityNet,
-                uint256 feeGrowthOutside0X128,
-                uint256 feeGrowthOutside1X128,
-                int56 tickCumulativeOutside,
-                uint160 secondsPerLiquidityOutsideX128,
-                uint32 secondsOutside,
-                bool initialized
-            );
-        }
-    }
-
-    let pool = IPool::new(pool_address, provider); 
-    let tick_info: Info = match pool.ticks(*tick).call().await.map_err(|e| e.to_string())? {
-        IPool::ticksReturn{
-            liquidityGross, 
-            liquidityNet,
-            initialized, 
-            ..
-        } => Info {
-            liquidity_gross: liquidityGross, 
-            liquidity_net: liquidityNet, 
-            initialized: initialized
-        }
-    };
-
-    Ok(tick_info)
 }
 
 
@@ -80,14 +42,14 @@ pub fn _update (
     liquidity_delta: i128,
     upper: bool, 
     max_liquidity: u128 
-) -> Result<bool, String> {
+) -> Result<bool> {
 
     let tick_info = mapping.entry(tick).or_insert_with(Default::default);
 
     let liquidity_gross_before = tick_info.liquidity_gross; 
     let liquidity_gross_after = add_delta(liquidity_gross_before, liquidity_delta)?;
 
-    if liquidity_gross_after > max_liquidity {return Err("Liquidity gross larger than max liquidity".to_string())}; 
+    if liquidity_gross_after > max_liquidity {return Err(eyre!("Liquidity gross larger than max liquidity"))}; 
 
     let flipped = (liquidity_gross_after == 0) != (liquidity_gross_before == 0); 
 
@@ -102,7 +64,7 @@ pub fn _update (
                 tick_info.liquidity_net = val; 
                 Ok(flipped)
             },
-            None => return Err("Overflow occured in liquidity net calculation".to_string()) 
+            None => return Err(eyre!("Overflow occured in liquidity net calculation")) 
         }
     }  else {
         match tick_info.liquidity_net.checked_add(liquidity_delta) {
@@ -110,25 +72,7 @@ pub fn _update (
                 tick_info.liquidity_net = val; 
                 Ok(flipped)
             },
-            None => return Err("Overflow occured in liquidity net calculation".to_string())
+            None => return Err(eyre!("Overflow occured in liquidity net calculation"))
         }
     }
-}
-
-/// @notice Transitions to next tick as needed by price movement
-/// @param self The mapping containing all tick information for initialized ticks
-/// @param tick The destination tick of the transition
-/// @param feeGrowthGlobal0X128 The all-time global fee growth, per unit of liquidity, in token0
-/// @param feeGrowthGlobal1X128 The all-time global fee growth, per unit of liquidity, in token1
-/// @param secondsPerLiquidityCumulativeX128 The current seconds per liquidity
-/// @param tickCumulative The tick * time elapsed since the pool was first initialized
-/// @param time The current block.timestamp
-/// @return liquidityNet The amount of liquidity added (subtracted) when tick is crossed from left to right (right to left)
-pub async fn cross(
-    provider: &RootProvider<Http<Client>>, 
-    pool_address: Address, 
-    tick: i32,
-) -> Result<i128, String> {
-    let tick_info = get_tick_info_from_ticks(provider, pool_address, &tick).await?; 
-    Ok(tick_info.liquidity_net)
 }

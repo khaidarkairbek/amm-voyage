@@ -1,5 +1,6 @@
 use alloy::primitives::{U256, I256}; 
 use super::{full_math, sqrt_price_math}; 
+use eyre::{eyre, Result}; 
 
 
 /// @notice Computes the result of swapping some amount in, or amount out, given the parameters of the swap
@@ -19,7 +20,7 @@ pub fn compute_swap_step (
     liquidity: u128, 
     amount_remaining: I256, 
     fee_pips: u32
-) -> Result<(U256, U256, U256, U256), String> {
+) -> Result<(U256, U256, U256, U256)> {
     let zero_for_one = sqrt_ratio_current_x96 >= sqrt_ratio_target_x96; 
     let exact_in = amount_remaining >= I256::ZERO; 
 

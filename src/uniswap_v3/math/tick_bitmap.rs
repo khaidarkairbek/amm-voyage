@@ -1,7 +1,7 @@
 use alloy::primitives::U256;
 
 use super::{bit_math::*, constants::U256_1, super::PoolState};
-
+use eyre::{eyre, Result};
 
 /// @notice Computes the position in the mapping where the initialized bit for a tick lives
 /// @param tick The tick for which to compute the position
@@ -26,7 +26,7 @@ pub async fn next_initialized_tick_within_one_word (
     pool_state: &PoolState,
     tick: i32,
     lte: bool
-) -> Result<(i32, bool), String>{
+) -> Result<(i32, bool)>{
     let mut compressed: i32 = tick / pool_state.tick_spacing;
     if tick < 0 && tick % pool_state.tick_spacing != 0 {
         compressed = compressed - 1; 
@@ -39,7 +39,7 @@ pub async fn next_initialized_tick_within_one_word (
 
             let word = match pool_state.tick_bitmap.get(&word_pos) {
                 Some(word) => word, 
-                None => return Err("Word position not in tick bitmap".to_string())            
+                None => return Err(eyre!("Word position not in tick bitmap"))            
             };
             //get_word_from_bitmap(provider, pool_address, &word_pos).await?; 
             let masked = word & mask;
@@ -62,7 +62,7 @@ pub async fn next_initialized_tick_within_one_word (
             let mask: U256 = !((U256_1 << bit_pos) - U256_1); 
             let word = match pool_state.tick_bitmap.get(&word_pos) {
                 Some(word) => word, 
-                None => return Err("Word position not in tick bitmap".to_string())            
+                None => return Err(eyre!("Word position not in tick bitmap"))            
             };
             let masked = word & mask;
             let initialized = !masked.is_zero();

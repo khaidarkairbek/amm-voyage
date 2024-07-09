@@ -1,6 +1,8 @@
 use alloy::primitives::{U256, I256}; 
 use super::constants::*; 
 
+use eyre::{eyre, Result};
+
 /// @dev The minimum tick that may be passed to #getSqrtRatioAtTick computed from log base 1.0001 of 2**-128
 pub const MIN_TICK: i32 = -887272;
 /// @dev The maximum tick that may be passed to #getSqrtRatioAtTick computed from log base 1.0001 of 2**128 
@@ -33,11 +35,11 @@ pub const TICK_HIGH: I256 = I256::from_raw(U256::from_limbs([
 /// @param tick The input tick for the above formula
 /// @return sqrtPriceX96 A Fixed point Q64.96 number representing the sqrt of the ratio of the two assets (token1/token0)
 /// at the given tick
-pub fn get_sqrt_ratio_at_tick(tick: i32) -> Result<U256, String> {
+pub fn get_sqrt_ratio_at_tick(tick: i32) -> Result<U256> {
     let abs_tick:U256 = U256::from(tick.unsigned_abs()); 
 
     if abs_tick > U256_MAX_TICK {
-        return Err("Tick out of bounds".to_string());
+        return Err(eyre!("Tick out of bounds"));
     }
 
     let mut ratio = if abs_tick & (U256_1) != U256::ZERO {
@@ -120,9 +122,9 @@ pub fn get_sqrt_ratio_at_tick(tick: i32) -> Result<U256, String> {
         })
 }
 
-pub fn get_tick_at_sqrt_ratio(sqrt_price_x_96: U256) -> Result<i32, String> {
+pub fn get_tick_at_sqrt_ratio(sqrt_price_x_96: U256) -> Result<i32> {
     if !(sqrt_price_x_96 >= MIN_SQRT_RATIO && sqrt_price_x_96 < MAX_SQRT_RATIO) {
-        return Err("The price is out of bounds".to_string());
+        return Err(eyre!("The price is out of bounds"));
     }
 
     let ratio: U256 = sqrt_price_x_96<<32;

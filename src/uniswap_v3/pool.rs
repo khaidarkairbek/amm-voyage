@@ -1,8 +1,11 @@
-use alloy::{primitives::{U256, I256}, transports::http::{Client, Http}, providers::RootProvider};
-
+use alloy::{
+    primitives::{U256, I256}, 
+    transports::http::{Client, Http}, 
+    providers::RootProvider
+};
 use super::PoolState;
-
 use super::math::{liquidity_math, low_gas_safe_math, safe_cast, swap_math, tick, tick_bitmap, tick_math};
+use eyre::{eyre, Result};
 
 pub struct SwapState {
     // the amount remaining to be swapped in/out of the input/output asset
@@ -36,28 +39,28 @@ pub struct StepComputations {
 
 pub async fn swap (
     provider: &RootProvider<Http<Client>>, 
-    pool_state: &PoolState,
+    pool_state: &mut PoolState,
     zero_for_one: bool, 
     amount_specified: I256, 
     sqrt_price_limit_x96: U256
-) -> Result<(I256, I256), String>{
+) -> Result<(I256, I256)>{
     if amount_specified == I256::ZERO {
-        return Err("Amount specified is zero, no swap".to_string())
+        return Err(eyre!("Amount specified is zero, no swap"))
     }
 
     let slot0_start = &pool_state.slot0; 
 
     if !slot0_start.unlocked {
-        return Err("Pool is locked".to_string())
+        return Err(eyre!("Pool is locked"))
     }
  
     if zero_for_one {
         if !(sqrt_price_limit_x96 < slot0_start.sqrt_price_x96 && sqrt_price_limit_x96 > tick_math::MIN_SQRT_RATIO) {
-            return Err("SPL".to_string())
+            return Err(eyre!("SPL"))
         }
     } else {
         if !(sqrt_price_limit_x96 > slot0_start.sqrt_price_x96 && sqrt_price_limit_x96 < tick_math::MAX_SQRT_RATIO) {
-            return Err("SPL".to_string())
+            return Err(eyre!("SPL"))
         }
     }
 
@@ -75,8 +78,6 @@ pub async fn swap (
         let mut step: StepComputations = Default::default(); 
         step.sqrt_price_start_x96 = state.sqrt_price_x96; 
         (step.tick_next, step.initialized) = tick_bitmap::next_initialized_tick_within_one_word( pool_state, state.tick, zero_for_one).await?;
-
-        println!("The next tick is {:?} and it is initialized: {:?}", step.tick_next, step.initialized);
 
         if step.tick_next < tick_math::MIN_TICK {
             step.tick_next = tick_math::MIN_TICK;
@@ -107,8 +108,6 @@ pub async fn swap (
             pool_state.fee
         )?;
 
-        println!("The amount in is {:?}, amount out: {:?} and fee amount: {:?}", step.amount_in, step.amount_out, step.fee_amount);
-
         if exact_input {
             state.amount_specified_remaining -= safe_cast::to_int256(step.amount_in + step.fee_amount)?;
             state.amount_calculated = low_gas_safe_math::signed_sub(state.amount_calculated, safe_cast::to_int256(step.amount_out)?)?; 
@@ -119,11 +118,14 @@ pub async fn swap (
 
         if state.sqrt_price_x96 == step.sqrt_price_next_x96 {
             if step.initialized {
-                let mut liquidity_net = tick::cross(
-                    provider, 
-                    pool_state.pool_address, 
-                    step.tick_next,
-                ).await?;
+                let mut liquidity_net: i128 = match pool_state.liquidity_net_tickmap.get(&step.tick_next) {
+                    Some(val) => *val, 
+                    None => {
+                        println!("Tick {} out of range: loading new liquidity map", step.tick_next); 
+                        pool_state.update_liquidity_net_tickmap(provider, step.tick_next).await?; 
+                        *pool_state.liquidity_net_tickmap.get(&step.tick_next).ok_or(eyre!("Next tick out of allowed range"))?
+                    }
+                };
 
                 if zero_for_one {liquidity_net = -liquidity_net} 
                 state.liquidity = liquidity_math::add_delta(state.liquidity, liquidity_net)?;
