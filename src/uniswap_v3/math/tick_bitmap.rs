@@ -1,6 +1,10 @@
-use alloy::primitives::U256;
+use alloy::{
+    primitives::{U256, I256}, 
+    transports::http::{Client, Http}, 
+    providers::RootProvider
+};
 
-use super::{bit_math::*, constants::U256_1, super::PoolState};
+use super::{bit_math::*, constants::U256_1, super::pool::PoolState};
 use eyre::{eyre, Result};
 
 /// @notice Computes the position in the mapping where the initialized bit for a tick lives
@@ -23,7 +27,8 @@ pub fn position (tick: i32) -> (i16, u8) {
 /// @return next The next initialized or uninitialized tick up to 256 ticks away from the current tick
 /// @return initialized Whether the next tick is initialized, as the function only searches within up to 256 ticks
 pub async fn next_initialized_tick_within_one_word (
-    pool_state: &PoolState,
+    pool_state: &mut PoolState,
+    provider: &RootProvider<Http<Client>>,
     tick: i32,
     lte: bool
 ) -> Result<(i32, bool)>{
@@ -38,8 +43,12 @@ pub async fn next_initialized_tick_within_one_word (
             let mask: U256 = (U256_1 << bit_pos) - U256_1 + (U256_1 << bit_pos); 
 
             let word = match pool_state.tick_bitmap.get(&word_pos) {
-                Some(word) => word, 
-                None => return Err(eyre!("Word position not in tick bitmap"))            
+                Some(word) => *word, 
+                None => {
+                    println!("Word position {} out of range: loading new tick bitmap", word_pos); 
+                    pool_state.update_tick_bitmap(provider, word_pos).await?; 
+                    *pool_state.tick_bitmap.get(&word_pos).ok_or(eyre!("Next word pos outside of the range"))?
+                }        
             };
             //get_word_from_bitmap(provider, pool_address, &word_pos).await?; 
             let masked = word & mask;
@@ -61,8 +70,12 @@ pub async fn next_initialized_tick_within_one_word (
             let (word_pos, bit_pos) = position(compressed + 1); 
             let mask: U256 = !((U256_1 << bit_pos) - U256_1); 
             let word = match pool_state.tick_bitmap.get(&word_pos) {
-                Some(word) => word, 
-                None => return Err(eyre!("Word position not in tick bitmap"))            
+                Some(word) => *word, 
+                None => {
+                    println!("Word position {} out of range: loading new tick bitmap", word_pos); 
+                    pool_state.update_tick_bitmap(provider, word_pos).await?; 
+                    *pool_state.tick_bitmap.get(&word_pos).ok_or(eyre!("Next word pos outside of the range"))?
+                }            
             };
             let masked = word & mask;
             let initialized = !masked.is_zero();

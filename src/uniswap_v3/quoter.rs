@@ -1,12 +1,12 @@
 use alloy::{
-    primitives::{address, Address, U256}, 
+    primitives::{Address, U256}, 
     providers::RootProvider, 
     sol, 
     transports::http::{Client, Http}
 };
-use eyre::{eyre, Result}; 
+use eyre::Result; 
 use super::utils::UNISWAP_V3_QUOTER_ADDRESS;
-use super::SwapResult;
+use super::pool::SwapResult;
 
 pub async fn _quote_exact_input_single(
     provider: &RootProvider<Http<Client>>,

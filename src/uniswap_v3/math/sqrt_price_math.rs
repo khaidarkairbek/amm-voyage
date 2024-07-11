@@ -2,7 +2,6 @@
 use alloy::primitives::{U256, U160, I256};
 use super::{full_math, low_gas_safe_math, unsafe_math, constants::{FIXED_POINT96_RESOLUTION, Q96}, safe_cast::to_int256}; 
 use eyre::{eyre, Result}; 
-
 /// @notice Gets the next sqrt price given a delta of token0
 /// @dev Always rounds up, because in the exact output case (increasing price) we need to move the price at least
 /// far enough to get the desired output amount, and in the exact input case (decreasing price) we need to move the
@@ -174,9 +173,7 @@ pub fn get_amount0_delta_round_up (
     round_up: bool
 ) -> Result<U256> {
     if sqrt_ratio_ax96 > sqrt_ratio_bx96 { 
-        let temp = sqrt_ratio_ax96.clone();
-        sqrt_ratio_ax96 = sqrt_ratio_bx96; 
-        sqrt_ratio_bx96 = temp;
+        (sqrt_ratio_ax96, sqrt_ratio_bx96) = (sqrt_ratio_bx96, sqrt_ratio_ax96);
     }
 
     let numerator1: U256 = U256::from(liquidity) << FIXED_POINT96_RESOLUTION;
@@ -208,7 +205,7 @@ pub fn get_amount1_delta_round_up (
     round_up: bool
 ) -> Result<U256> {
     if sqrt_ratio_ax96 > sqrt_ratio_bx96 { 
-        std::mem::swap(&mut sqrt_ratio_ax96, &mut sqrt_ratio_bx96);
+        (sqrt_ratio_ax96, sqrt_ratio_bx96) = (sqrt_ratio_bx96, sqrt_ratio_ax96);
     }
 
     match round_up {
