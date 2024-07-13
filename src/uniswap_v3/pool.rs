@@ -3,8 +3,10 @@ use alloy::{
     providers::RootProvider, 
     sol, 
     sol_types::SolCall, 
-    transports::http::{Client, Http}};
-use super::math::tick_math::{MAX_SQRT_RATIO, MAX_TICK, MAX_WORD_POS, MIN_SQRT_RATIO, MIN_TICK, MIN_WORD_POS};
+    transports::http::{Client, Http}
+};
+
+use super::math::{tick::Info, tick_math::{MAX_SQRT_RATIO, MAX_TICK, MAX_WORD_POS, MIN_SQRT_RATIO, MIN_TICK, MIN_WORD_POS}};
 use std::collections::HashMap; 
 use eyre::{eyre, Result}; 
 use super::{multicall::multicall, swap, math};
@@ -85,25 +87,32 @@ pub struct PoolState {
     pub token0: Address, 
     pub token1: Address, 
     pub tick_bitmap: HashMap<i16, U256>, 
-    pub liquidity_net_tickmap: HashMap<i32, i128>,
     pub slot0: Slot0, 
     pub liquidity: u128,
+    pub ticks: HashMap<i32, Info>
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, PartialOrd)]
 pub struct SwapResult {
     pub amount_in: U256, 
     pub amount_out: U256
 }
 
+pub enum LoadingPattern {
+    LOW, 
+    HIGH, 
+    MID
+}
+
 impl PoolState {
-    pub async fn load_pool_state (
+    pub async fn load (
         provider: &RootProvider<Http<Client>>,
         pool_factory_address: Address, 
         pair: (Address, Address),
         fee: u32
     ) -> Result<Self> {
         let pool_address = get_pool_address(provider, pool_factory_address, pair, fee).await?;
+        println!("Pool address {}",pool_address);
     
         let (slot0, tick_spacing, liquidity, fee, token0, token1) = {
     
@@ -145,59 +154,27 @@ impl PoolState {
                 IPool::token1Call::abi_decode_returns(&encoded_return_data[5], true)?._0
             )
         };
+
+        let mut compressed: i32 = slot0.tick / tick_spacing;
+        if slot0.tick < 0 && slot0.tick % tick_spacing != 0 {
+            compressed = compressed - 1; 
+        }
+        let word_pos = (compressed >> 8) as i16;
     
-        let liquidity_net_tickmap: HashMap<i32, i128> = {
-            let compressed = slot0.tick / tick_spacing; 
-            let min_compressed = MIN_TICK / tick_spacing; 
-            let max_compressed = MAX_TICK / tick_spacing; 
+        let ticks: HashMap<i32, Info> = Self::get_ticks(
+            provider, 
+            pool_address, 
+            slot0.tick, 
+            tick_spacing, 
+            LoadingPattern::MID
+        ).await?;
     
-            let tick_list: Vec<i32> = (if min_compressed > compressed - 100 {min_compressed} else {compressed - 100} .. if max_compressed < compressed + 100 {max_compressed} else {compressed + 100}).map(|compressed| compressed * tick_spacing).collect(); 
-            let liqudity_tickmap_call_data: Vec<Vec<u8>> = tick_list
-            .iter()
-            .map(|&tick| {
-                IPool::ticksCall{tick: tick}.abi_encode()
-            })
-            .collect(); 
-            
-            let return_data = multicall(provider, pool_address, false, liqudity_tickmap_call_data).await.unwrap();
-            let mut result = Vec::<i128>::new();
-            for data in return_data.iter() {
-                let liquidity_net = IPool::ticksCall::abi_decode_returns(&data.returnData, true)?.liquidityNet; 
-                result.push(liquidity_net);
-            } 
-    
-            tick_list.into_iter().zip(result.into_iter()).collect()
-        };
-    
-    
-        let tick_bitmap: HashMap<i16, U256> = {
-            // Generate word position list for tick bitmap
-            let word_pos_list: Vec<i16> = {
-                let tick = slot0.tick; 
-                let mut compressed: i32 = tick / tick_spacing;
-                if tick < 0 && tick % tick_spacing != 0 {
-                    compressed = compressed - 1; 
-                }
-                let curr_tick_word_pos = (compressed >> 8) as i16; 
-                (if MIN_WORD_POS > curr_tick_word_pos - 20 {MIN_WORD_POS} else {curr_tick_word_pos - 20} .. if MAX_WORD_POS < curr_tick_word_pos + 20 {MAX_WORD_POS} else {curr_tick_word_pos + 20}).collect()
-            };
-    
-            let tick_bitmap_call_data: Vec<Vec<u8>> = word_pos_list
-            .iter()
-            .map(|&word_pos| {
-                IPool::tickBitmapCall{wordPosition: word_pos}.abi_encode()
-            })
-            .collect(); 
-    
-            let return_data = multicall(provider, pool_address, false, tick_bitmap_call_data).await.unwrap();
-            let mut result = Vec::<U256>::new();
-            for data in return_data.iter() {
-                let word = IPool::tickBitmapCall::abi_decode_returns(&data.returnData, true)?._0; 
-                result.push(word);
-            }
-    
-            word_pos_list.into_iter().zip(result.into_iter()).collect()
-        };
+        let tick_bitmap: HashMap<i16, U256> = Self::get_tick_bitmap(
+            provider, 
+            pool_address, 
+            word_pos, 
+            LoadingPattern::MID
+        ).await?; 
     
         Ok(PoolState{
             pool_address, 
@@ -208,28 +185,38 @@ impl PoolState {
             tick_bitmap, 
             slot0, 
             liquidity, 
-            liquidity_net_tickmap
+            ticks
         })
     }
 
-    pub async fn update_liquidity_net_tickmap (
-        &mut self,
-        provider: &RootProvider<Http<Client>>, 
-        next_tick: i32
-    ) -> Result<()> {
-        let tick_spacing = self.tick_spacing; 
-        let compressed = next_tick / tick_spacing; 
+    pub async fn get_ticks (
+        provider: &RootProvider<Http<Client>>,
+        pool_address: Address ,
+        tick: i32, 
+        tick_spacing: i32, 
+        load: LoadingPattern 
+    ) -> Result<HashMap<i32, Info>>{
+        let compressed = tick / tick_spacing; 
         let min_compressed = MIN_TICK / tick_spacing; 
         let max_compressed = MAX_TICK / tick_spacing; 
 
-        let tick_list: Vec<i32> = match next_tick < self.slot0.tick {
-            true => {
-                (if min_compressed > compressed - 200 {min_compressed} else {compressed - 200} ..= compressed).map(|compressed| compressed * tick_spacing).collect()
-            }, 
-            false => {
-                (compressed ..= if max_compressed < compressed + 200 {max_compressed} else {compressed + 200}).map(|compressed| compressed * tick_spacing).collect()
-            }
-        }; 
+        let tick_list: Vec<i32> = match load {
+            LoadingPattern::MID => {
+                let bottom = if min_compressed > compressed - 100 {min_compressed} else {compressed - 100};
+                let top = if max_compressed < compressed + 100 {max_compressed} else {compressed + 100};
+                bottom ..= top
+            },
+            LoadingPattern::HIGH => {
+                let bottom = compressed; 
+                let top = if max_compressed < compressed + 200 {max_compressed} else {compressed + 200};
+                bottom ..= top
+            },
+            LoadingPattern::LOW => {
+                let bottom = if min_compressed > compressed - 200 {min_compressed} else {compressed - 200}; 
+                let top = compressed;
+                bottom ..= top
+            },
+        }.map(|compressed| compressed * tick_spacing).collect();
 
         let liqudity_tickmap_call_data: Vec<Vec<u8>> = tick_list
         .iter()
@@ -237,17 +224,90 @@ impl PoolState {
             IPool::ticksCall{tick: tick}.abi_encode()
         })
         .collect(); 
-            
-        let return_data = multicall(provider, self.pool_address, false, liqudity_tickmap_call_data).await?;
-        let mut result = Vec::<i128>::new();
-        for data in return_data.iter() {
-            let liquidity_net = IPool::ticksCall::abi_decode_returns(&data.returnData, true)?.liquidityNet; 
-            result.push(liquidity_net);
-        } 
-    
-        self.liquidity_net_tickmap = tick_list.into_iter().zip(result.into_iter()).collect();
+        
+        let return_data = multicall(provider, pool_address, false, liqudity_tickmap_call_data).await?;
 
+        let mut map = HashMap::new();
+        for (tick, data) in tick_list.into_iter().zip(return_data.iter()) {
+            let info: Info = match IPool::ticksCall::abi_decode_returns(&data.returnData, true)? {
+                IPool::ticksReturn{
+                    liquidityGross, 
+                    liquidityNet, 
+                    feeGrowthOutside0X128, 
+                    feeGrowthOutside1X128, 
+                    initialized, ..
+                } => {
+                    Info {
+                        liquidity_gross : liquidityGross, 
+                        liquidity_net: liquidityNet, 
+                        fee_growth_outside0_x128: feeGrowthOutside0X128, 
+                        fee_growth_outside1_x128: feeGrowthOutside1X128, 
+                        initialized: initialized
+                    }
+                }
+            };
+            map.insert(tick, info);
+        } 
+
+        Ok(map)
+    }
+
+    pub async fn update_ticks (
+        &mut self,
+        provider: &RootProvider<Http<Client>>, 
+        next_tick: i32
+    ) -> Result<()> {
+        let load = if next_tick < self.slot0.tick {
+            LoadingPattern::LOW
+        } else {
+            LoadingPattern::HIGH
+        }; 
+
+        self.ticks = Self::get_ticks(provider, self.pool_address, next_tick, self.tick_spacing, load).await?;
         Ok(())
+    }
+
+    pub async fn get_tick_bitmap (
+        provider: &RootProvider<Http<Client>>,
+        pool_address: Address ,
+        word_pos: i16,
+        load: LoadingPattern 
+    ) -> Result<HashMap<i16, U256>>{ 
+        // Generate word position list for tick bitmap
+        let word_pos_list: Vec<i16> = match load {
+            LoadingPattern::MID => {
+                let bottom = if MIN_WORD_POS > word_pos - 20 {MIN_WORD_POS} else {word_pos - 20}; 
+                let top = if MAX_WORD_POS < word_pos + 20 {MAX_WORD_POS} else {word_pos + 20};
+                bottom ..= top
+            }, 
+            LoadingPattern::LOW => {
+                let bottom = if MIN_WORD_POS > word_pos - 20 {MIN_WORD_POS} else {word_pos - 20}; 
+                let top = word_pos; 
+                bottom ..= top
+            }, 
+            LoadingPattern::HIGH => {
+                let bottom = word_pos; 
+                let top = if MAX_WORD_POS < word_pos + 20 {MAX_WORD_POS} else {word_pos + 20}; 
+                bottom ..= top
+            }
+        }.collect();
+
+        let tick_bitmap_call_data: Vec<Vec<u8>> = word_pos_list
+        .iter()
+        .map(|&word_pos| {
+            IPool::tickBitmapCall{wordPosition: word_pos}.abi_encode()
+        })
+        .collect(); 
+
+        let return_data = multicall(provider, pool_address, false, tick_bitmap_call_data).await?;
+
+        let mut map = HashMap::new();
+        for (tick, data) in word_pos_list.into_iter().zip(return_data.iter()) {
+            let word = IPool::tickBitmapCall::abi_decode_returns(&data.returnData, true)?._0; 
+            map.insert(tick, word);
+        } 
+
+        Ok(map)
     }
 
     pub async fn update_tick_bitmap (
@@ -255,46 +315,22 @@ impl PoolState {
         provider: &RootProvider<Http<Client>>, 
         word_pos: i16
     ) -> Result<()> {
-        let slot0 = &self.slot0; 
-        let pool_address = self.pool_address; 
-        let tick_spacing = self.tick_spacing; 
 
-        let init_tick_word_pos = ({
-            let init_tick = slot0.tick; 
-            let mut compressed: i32 = init_tick / tick_spacing;
-            if init_tick < 0 && init_tick % tick_spacing != 0 {
-                compressed = compressed - 1;
-            }
-            compressed
-        } >> 8) as i16;
+        let init_tick = self.slot0.tick; 
+        let mut compressed: i32 = init_tick / self.tick_spacing;
+        if init_tick < 0 && init_tick % self.tick_spacing != 0 {
+            compressed = compressed - 1;
+        }
 
-        let tick_bitmap: HashMap<i16, U256> = {
-            let word_pos_list: Vec<i16> =  match word_pos < init_tick_word_pos {
-                true => (if MIN_WORD_POS > word_pos - 20 {MIN_WORD_POS} else {word_pos - 20} ..= word_pos).collect() , 
-                false => (word_pos ..= if MAX_WORD_POS < word_pos + 20 {MAX_WORD_POS} else {word_pos + 20}).collect()
-            }; 
-    
-            let tick_bitmap_call_data: Vec<Vec<u8>> = word_pos_list
-            .iter()
-            .map(|&word_pos| {
-                IPool::tickBitmapCall{wordPosition: word_pos}.abi_encode()
-            })
-            .collect(); 
-    
-            let return_data = multicall(provider, pool_address, false, tick_bitmap_call_data).await.unwrap();
-            let mut result = Vec::<U256>::new();
-            for data in return_data.iter() {
-                let word = IPool::tickBitmapCall::abi_decode_returns(&data.returnData, true)?._0; 
-                result.push(word);
-            }
-    
-            word_pos_list.into_iter().zip(result.into_iter()).collect()
-        };
+        let load = if word_pos < (compressed >> 8) as i16 {
+            LoadingPattern::LOW
+        } else {
+            LoadingPattern::HIGH
+        }; 
 
-        self.tick_bitmap = tick_bitmap;
+        self.tick_bitmap = Self::get_tick_bitmap(provider, self.pool_address, word_pos, load).await?;
         Ok(())
     }
-
 }
 
 pub async fn get_pool_address(
@@ -319,10 +355,9 @@ pub async fn simulate_exact_input_single(
     one_for_two: bool
 ) -> Result<SwapResult> {
 
-    let mut pool_state = PoolState::load_pool_state(provider, pool_factory_address, pair, 10000).await?;
+    let mut pool_state = PoolState::load(provider, pool_factory_address, pair, 10000).await?;
 
     let zero_for_one = if pair.0 == pool_state.token0 {one_for_two} else {!one_for_two}; 
-
     let (amount0, amount1) = swap::swap(
         provider,
         &mut pool_state,
@@ -334,4 +369,30 @@ pub async fn simulate_exact_input_single(
     let amount_out = (if zero_for_one {amount1} else {amount0}).unsigned_abs();
 
     Ok(SwapResult{amount_in, amount_out})
+}
+
+#[cfg(test)]
+mod tests {
+    use alloy::{
+        primitives::{address, U256}, providers::ProviderBuilder}; 
+    use crate::uniswap_v3::{utils::UNISWAP_V3_POOL_FACTORY_ADDRESS, quoter};
+    use super::*; 
+
+    #[tokio::test]
+    async fn simulate_exact_input_single_test() {
+        let rpc_url = "https://eth.llamarpc.com".parse().unwrap();
+        // Create a provider with the HTTP transport using the `reqwest` crate.
+        let provider = ProviderBuilder::new().on_http(rpc_url);
+
+        let weth = address!("C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2");
+        let usdc = address!("A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
+
+        let amount_in = U256::from(20000000000000000 as u128); 
+        let zero_for_one = false; 
+
+        assert_eq!(
+            simulate_exact_input_single(&provider, UNISWAP_V3_POOL_FACTORY_ADDRESS, (weth, usdc), amount_in, zero_for_one).await.unwrap(), 
+            quoter::_quote_exact_input_single(&provider, (weth, usdc), amount_in, false).await.unwrap()
+        );  
+    }
 }
