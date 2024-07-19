@@ -90,15 +90,18 @@ pub fn _update (
 /// @return feeGrowthInside0X128 The all-time fee growth in token0, per unit of liquidity, inside the position's tick boundaries
 /// @return feeGrowthInside1X128 The all-time fee growth in token1, per unit of liquidity, inside the position's tick boundaries
 pub fn get_fee_growth_inside(
-    mapping: HashMap<i32, Info>, 
-    tick_lower: i32, 
-    tick_upper: i32, 
-    tick_current: i32, 
+    tick_lower: &i32,
+    tick_upper: &i32,
+    tick_lower_info: &Info,
+    tick_upper_info: &Info,
+    tick_current: &i32,
     fee_growth_global0_x128: U256,
     fee_growth_global1_x128: U256
 ) -> Result<(U256, U256)> {
-    let lower = mapping.get(&tick_lower).ok_or(eyre!("Lower tick not in mapping"))?;
-    let upper = mapping.get(&tick_upper).ok_or(eyre!("Upper tick not in mapping"))?;
+    //let lower = mapping.get(&tick_lower).ok_or(eyre!("Lower tick not in mapping"))?;
+    //let upper = mapping.get(&tick_upper).ok_or(eyre!("Upper tick not in mapping"))?;
+    let lower = tick_lower_info; 
+    let upper = tick_upper_info;
 
     // calculate fee growth below
     let fee_growth_below0_x128: U256; 

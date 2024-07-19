@@ -5,6 +5,7 @@ use alloy::{
     primitives::{Address, address}
 }; 
 use eyre::Result;
+use IMulticall3::Call3;
 
 sol! {
     #[sol(rpc)]
@@ -39,17 +40,28 @@ pub async fn multicall (
     call_data_list: Vec<Vec<u8>>
 ) -> Result<Vec<IMulticall3::Result>>{
     let multicall_address = address!("cA11bde05977b3631167028862bE2a173976CA11"); 
+    let multicall = IMulticall3::new(multicall_address, provider);
 
+    let calls: Vec<Call3> = call_data_list
+        .into_iter()
+        .map(|call_data| {
+            IMulticall3::Call3{
+                target: address, 
+                allowFailure: allow_failure, 
+                callData: call_data.into()
+            }
+        })
+        .collect();
+    
+    let chunk_size = 200;
 
-    let call = call_data_list
-    .into_iter()
-    .map(|call_data| {
-        IMulticall3::Call3{target: address, allowFailure: allow_failure, callData: call_data.into()}
-    })
-    .collect();
+    let mut return_data = Vec::<IMulticall3::Result>::new(); 
 
-    let multicall = IMulticall3::new(multicall_address, provider); 
-    match multicall.aggregate3(call).call().await? {
-        IMulticall3::aggregate3Return{returnData} => Ok(returnData),
-    }
+    for chunk in calls.chunks(chunk_size) {
+        match multicall.aggregate3(chunk.to_vec()).call().await? {
+            IMulticall3::aggregate3Return{returnData} => return_data.extend(returnData),
+        }
+    } 
+
+    Ok(return_data)
 }

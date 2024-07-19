@@ -27,7 +27,7 @@ pub async fn _quote_exact_input_single(
         }
     }
 
-    let (token_in, token_out) = if one_for_two {pair } else {(pair.1, pair.0)}; 
+    let (token_in, token_out) = if one_for_two {pair} else {(pair.1, pair.0)}; 
 
     let quoter = IQuoter::new(UNISWAP_V3_QUOTER_ADDRESS, provider); 
     match quoter.quoteExactInputSingle(token_in, token_out, 10000, amount_in, U256::ZERO).call().await? {

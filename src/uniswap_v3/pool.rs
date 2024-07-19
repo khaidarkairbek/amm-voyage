@@ -1,15 +1,21 @@
-use alloy::{
+use alloy::{ 
     primitives::{Address, Bytes, U256}, 
     providers::RootProvider, 
     sol, 
     sol_types::SolCall, 
     transports::http::{Client, Http}
 };
-
-use super::math::{tick::Info, tick_math::{MAX_SQRT_RATIO, MAX_TICK, MAX_WORD_POS, MIN_SQRT_RATIO, MIN_TICK, MIN_WORD_POS}};
+use super::{math::{
+    constants::{Q128, Q96, U256_2}, 
+    full_math::{self, mul_div}, 
+    tick::{get_fee_growth_inside, Info}, 
+    tick_math::{MAX_SQRT_RATIO, MAX_TICK, MAX_WORD_POS, MIN_SQRT_RATIO, MIN_TICK, MIN_WORD_POS}
+}, swap::sqrt};
 use std::collections::HashMap; 
 use eyre::{eyre, Result}; 
 use super::{multicall::multicall, swap, math};
+use polars::{prelude::*, io::prelude::CsvWriter}; 
+use std::fs::File;
 
 sol! {
     #[sol(rpc)]
@@ -74,18 +80,36 @@ sol! {
     }
 }
 
+sol! {
+    #[sol(rpc)]
+    interface IERC20 {
+
+        function decimals() external view returns (uint8);
+
+        function symbol() external view returns (string memory);
+    }
+}
+
 pub struct Slot0 {
     pub sqrt_price_x96: U256,
     pub tick: i32,
     pub unlocked: bool
 }
 
+pub struct Token {
+    pub address: Address, 
+    pub symbol: String, 
+    pub decimals: u8
+}
+
 pub struct PoolState {
     pub pool_address: Address,
     pub tick_spacing: i32, 
     pub fee: u32, 
-    pub token0: Address, 
-    pub token1: Address, 
+    pub fee_growth_global0_x128: U256, 
+    pub fee_growth_global1_x128: U256, 
+    pub token0: Token, 
+    pub token1: Token, 
     pub tick_bitmap: HashMap<i16, U256>, 
     pub slot0: Slot0, 
     pub liquidity: u128,
@@ -98,10 +122,18 @@ pub struct SwapResult {
     pub amount_out: U256
 }
 
+#[derive(Debug, PartialEq, PartialOrd)]
+pub struct SwapResultSlippage {
+    pub amount_in: U256, 
+    pub amount_out: U256, 
+    pub price_impact: U256,
+}
+
 pub enum LoadingPattern {
     LOW, 
     HIGH, 
-    MID
+    MID, 
+    FULL
 }
 
 impl PoolState {
@@ -109,12 +141,13 @@ impl PoolState {
         provider: &RootProvider<Http<Client>>,
         pool_factory_address: Address, 
         pair: (Address, Address),
-        fee: u32
+        fee: u32, 
+        loading_pattern: LoadingPattern
     ) -> Result<Self> {
         let pool_address = get_pool_address(provider, pool_factory_address, pair, fee).await?;
         println!("Pool address {}",pool_address);
     
-        let (slot0, tick_spacing, liquidity, fee, token0, token1) = {
+        let (slot0, tick_spacing, liquidity, fee, token0_address, token1_address, fee_growth_global0_x128, fee_growth_global1_x128) = {
     
             let encoded_calls = vec![
                 IPool::slot0Call{}.abi_encode(), 
@@ -122,7 +155,10 @@ impl PoolState {
                 IPool::liquidityCall{}.abi_encode(), 
                 IPool::feeCall{}.abi_encode(), 
                 IPool::token0Call{}.abi_encode(), 
-                IPool::token1Call{}.abi_encode()]; 
+                IPool::token1Call{}.abi_encode(), 
+                IPool::feeGrowthGlobal0X128Call{}.abi_encode(),
+                IPool::feeGrowthGlobal1X128Call{}.abi_encode(),
+            ]; 
     
             let encoded_return_data: Vec<Bytes> = multicall(provider, pool_address, true, encoded_calls).await?
             .into_iter()
@@ -151,8 +187,26 @@ impl PoolState {
                 IPool::liquidityCall::abi_decode_returns(&encoded_return_data[2], true)?._0, 
                 IPool::feeCall::abi_decode_returns(&encoded_return_data[3], true)?._0, 
                 IPool::token0Call::abi_decode_returns(&encoded_return_data[4], true)?._0,
-                IPool::token1Call::abi_decode_returns(&encoded_return_data[5], true)?._0
+                IPool::token1Call::abi_decode_returns(&encoded_return_data[5], true)?._0, 
+                IPool::feeGrowthGlobal0X128Call::abi_decode_returns(&encoded_return_data[6], true)?._0,
+                IPool::feeGrowthGlobal1X128Call::abi_decode_returns(&encoded_return_data[7], true)?._0,
             )
+        };
+
+        let token0_contract = IERC20::new(token0_address, provider);
+
+        let token0 = Token {
+            address: token0_address, 
+            symbol: token0_contract.symbol().call().await?._0, 
+            decimals: token0_contract.decimals().call().await?._0,
+        }; 
+
+        let token1_contract = IERC20::new(token1_address, provider); 
+
+        let token1 = Token {
+            address: token1_address, 
+            symbol: token1_contract.symbol().call().await?._0, 
+            decimals: token1_contract.decimals().call().await?._0,
         };
 
         let mut compressed: i32 = slot0.tick / tick_spacing;
@@ -166,14 +220,14 @@ impl PoolState {
             pool_address, 
             slot0.tick, 
             tick_spacing, 
-            LoadingPattern::MID
+            &loading_pattern
         ).await?;
     
         let tick_bitmap: HashMap<i16, U256> = Self::get_tick_bitmap(
             provider, 
             pool_address, 
             word_pos, 
-            LoadingPattern::MID
+            &loading_pattern
         ).await?; 
     
         Ok(PoolState{
@@ -185,7 +239,9 @@ impl PoolState {
             tick_bitmap, 
             slot0, 
             liquidity, 
-            ticks
+            ticks, 
+            fee_growth_global0_x128, 
+            fee_growth_global1_x128
         })
     }
 
@@ -194,7 +250,7 @@ impl PoolState {
         pool_address: Address ,
         tick: i32, 
         tick_spacing: i32, 
-        load: LoadingPattern 
+        load: &LoadingPattern 
     ) -> Result<HashMap<i32, Info>>{
         let compressed = tick / tick_spacing; 
         let min_compressed = MIN_TICK / tick_spacing; 
@@ -216,6 +272,9 @@ impl PoolState {
                 let top = compressed;
                 bottom ..= top
             },
+            LoadingPattern::FULL => {
+                min_compressed ..= max_compressed
+            }
         }.map(|compressed| compressed * tick_spacing).collect();
 
         let liqudity_tickmap_call_data: Vec<Vec<u8>> = tick_list
@@ -263,7 +322,7 @@ impl PoolState {
             LoadingPattern::HIGH
         }; 
 
-        self.ticks = Self::get_ticks(provider, self.pool_address, next_tick, self.tick_spacing, load).await?;
+        self.ticks = Self::get_ticks(provider, self.pool_address, next_tick, self.tick_spacing, &load).await?;
         Ok(())
     }
 
@@ -271,7 +330,7 @@ impl PoolState {
         provider: &RootProvider<Http<Client>>,
         pool_address: Address ,
         word_pos: i16,
-        load: LoadingPattern 
+        load: &LoadingPattern 
     ) -> Result<HashMap<i16, U256>>{ 
         // Generate word position list for tick bitmap
         let word_pos_list: Vec<i16> = match load {
@@ -289,6 +348,9 @@ impl PoolState {
                 let bottom = word_pos; 
                 let top = if MAX_WORD_POS < word_pos + 20 {MAX_WORD_POS} else {word_pos + 20}; 
                 bottom ..= top
+            }, 
+            LoadingPattern::FULL => {
+                MIN_WORD_POS ..= MAX_WORD_POS
             }
         }.collect();
 
@@ -328,8 +390,72 @@ impl PoolState {
             LoadingPattern::HIGH
         }; 
 
-        self.tick_bitmap = Self::get_tick_bitmap(provider, self.pool_address, word_pos, load).await?;
+        self.tick_bitmap = Self::get_tick_bitmap(provider, self.pool_address, word_pos, &load).await?;
         Ok(())
+    }
+
+    pub fn export_to_df(
+        &self
+    ) -> Result<DataFrame> {
+        let ticks = &self.ticks; 
+
+        let mut tick = Vec::<i32>::new(); 
+        let mut liquidity_net = Vec::<String>::new(); 
+        let mut liquidity_gross = Vec::<String>::new(); 
+        let mut fee_inside0 = Vec::<String>::new(); 
+        let mut fee_inside1 = Vec::<String>::new(); 
+
+        let token0_decimals = self.token0.decimals as u32; 
+        let token1_decimals = self.token1.decimals as u32; 
+
+        let liquidity_decimals = (token0_decimals + token1_decimals) / 2;
+        println!("{}", liquidity_decimals);
+
+        for (_tick, info) in ticks.iter() {
+            tick.push(*_tick); 
+            liquidity_net.push(info.liquidity_net.to_string()); 
+            liquidity_gross.push(info.liquidity_gross.to_string()); 
+            let lower_tick = _tick; 
+            let upper_tick = _tick + self.tick_spacing; 
+            let (fee_growth_inside0_x128, fee_growth_inside1_x128) = match ticks.get(&upper_tick) {
+                Some(upper_info) => {
+                    get_fee_growth_inside(
+                        lower_tick, 
+                        &upper_tick, 
+                        info, 
+                        upper_info, 
+                        &self.slot0.tick, 
+                        self.fee_growth_global0_x128, 
+                        self.fee_growth_global1_x128
+                    )?
+                }, 
+                None => {
+                    (U256::ZERO, U256::ZERO)
+                }
+            }; 
+            
+            let _fee_inside0 = mul_div(fee_growth_inside0_x128, U256::from(info.liquidity_gross), Q128)?; 
+            let _fee_inside1 = mul_div(fee_growth_inside1_x128, U256::from(info.liquidity_gross), Q128)?;  
+            println!("good");
+            fee_inside0.push(_fee_inside0.to_string()); 
+            fee_inside1.push(_fee_inside1.to_string()); 
+        }
+
+        let tick_series = Series::new("tick", tick); 
+        let liquidity_net_series = Series::new("liquidity_net", liquidity_net); 
+        let liquidity_gross_series = Series::new("liquidity_gross", liquidity_gross); 
+        let fee_inside0_series = Series::new("fee_inside_0", fee_inside0);
+        let fee_inside1_series = Series::new("fee_inside_1", fee_inside1); 
+
+        let series_vector = vec![tick_series, liquidity_net_series, liquidity_gross_series, fee_inside0_series, fee_inside1_series]; 
+
+        let mut df = DataFrame::new(series_vector)?; 
+        let mut file = File::create("example.csv").expect("could not create file");
+        CsvWriter::new(&mut file).include_header(true).with_separator(b',').finish(&mut df)?; 
+
+        println!("{:?}", df); 
+
+        Ok(df)
     }
 }
 
@@ -355,9 +481,9 @@ pub async fn simulate_exact_input_single(
     one_for_two: bool
 ) -> Result<SwapResult> {
 
-    let mut pool_state = PoolState::load(provider, pool_factory_address, pair, 10000).await?;
+    let mut pool_state = PoolState::load(provider, pool_factory_address, pair, 10000, LoadingPattern::MID).await?; 
 
-    let zero_for_one = if pair.0 == pool_state.token0 {one_for_two} else {!one_for_two}; 
+    let zero_for_one = if pair.0 == pool_state.token0.address {one_for_two} else {!one_for_two}; 
     let (amount0, amount1) = swap::swap(
         provider,
         &mut pool_state,
@@ -369,6 +495,46 @@ pub async fn simulate_exact_input_single(
     let amount_out = (if zero_for_one {amount1} else {amount0}).unsigned_abs();
 
     Ok(SwapResult{amount_in, amount_out})
+}
+
+pub async fn simulate_swap_slippage(
+    provider: &RootProvider<Http<Client>>, 
+    pool_factory_address: Address, 
+    pair: (Address, Address),
+    one_for_two: bool, 
+    price_impact: u32
+) -> Result<SwapResultSlippage> {
+
+    let mut pool_state = PoolState::load(provider, pool_factory_address, pair, 10000, LoadingPattern::MID).await?; 
+
+    let zero_for_one = if pair.0 == pool_state.token0.address {one_for_two} else {!one_for_two}; 
+    let ((amount0, amount1), state_exec_sqrt_price_x96) = swap::swap_slippage(
+        provider,
+        &mut pool_state,
+        zero_for_one,
+        price_impact
+    ).await?;
+
+    let mut exec_sqrt_price_x96 = full_math::mul_div(
+        sqrt(U256::from((-amount1).into_raw()))?, 
+        Q96, 
+        sqrt(U256::from(amount0.into_raw()))?
+    )?;
+
+    exec_sqrt_price_x96 = state_exec_sqrt_price_x96;
+
+    //println!("{}, {}", state_exec_sqrt_price_x96, exec_sqrt_price_x96);
+
+    let exec_price_impact = U256::from(100000) - if zero_for_one {
+        full_math::mul_div(exec_sqrt_price_x96, U256::from(1000), pool_state.slot0.sqrt_price_x96)?
+    } else {
+        full_math::mul_div(pool_state.slot0.sqrt_price_x96, U256::from(1000), exec_sqrt_price_x96)?
+    }.pow(U256_2) / U256::from(10);
+
+    let amount_out = (if zero_for_one {amount1} else {amount0}).unsigned_abs();
+    let amount_in = (if zero_for_one {amount0} else {amount1}).unsigned_abs();
+
+    Ok(SwapResultSlippage{amount_in, amount_out, price_impact: exec_price_impact})
 }
 
 #[cfg(test)]
@@ -388,11 +554,34 @@ mod tests {
         let usdc = address!("A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
 
         let amount_in = U256::from(20000000000000000 as u128); 
-        let zero_for_one = false; 
 
         assert_eq!(
-            simulate_exact_input_single(&provider, UNISWAP_V3_POOL_FACTORY_ADDRESS, (weth, usdc), amount_in, zero_for_one).await.unwrap(), 
+            simulate_exact_input_single(&provider, UNISWAP_V3_POOL_FACTORY_ADDRESS, (weth, usdc), amount_in, false).await.unwrap(), 
             quoter::_quote_exact_input_single(&provider, (weth, usdc), amount_in, false).await.unwrap()
         );  
     }
+
+    #[tokio::test]
+    async fn simulate_swap_slippage_test() {
+        let rpc_url = "https://eth.llamarpc.com".parse().unwrap();
+        // Create a provider with the HTTP transport using the `reqwest` crate.
+        let provider = ProviderBuilder::new().on_http(rpc_url);
+
+        let weth = address!("C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2");
+        let usdc = address!("A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
+
+        let mut price_impact = 10; 
+
+        let mut swap_result = simulate_swap_slippage(&provider, UNISWAP_V3_POOL_FACTORY_ADDRESS, (weth, usdc), true, price_impact).await.unwrap(); 
+        println!("Swap Result : {:?}", swap_result); 
+        //assert less than 1% difference between executed price impact and initial price impact
+        assert!(swap_result.price_impact - U256::from(price_impact * 1000) < U256::from(1000));  
+
+        price_impact = 20;
+        swap_result = simulate_swap_slippage(&provider, UNISWAP_V3_POOL_FACTORY_ADDRESS, (weth, usdc), true, price_impact).await.unwrap(); 
+        println!("Swap Result : {:?}", swap_result); 
+        //assert less than 1% difference between executed price impact and initial price impact
+        assert!(swap_result.price_impact - U256::from(price_impact * 1000) < U256::from(1000));  
+    }
+
 }
